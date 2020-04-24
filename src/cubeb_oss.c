@@ -30,13 +30,13 @@ struct cubeb {
 };
 
 struct cubeb_stream {
+  /* Note: Must match cubeb_stream layout in cubeb.c. */
   cubeb * context;
-
+  void * user_ptr;
+  /**/
   cubeb_data_callback data_callback;
   cubeb_state_callback state_callback;
-  void * user_ptr;
   float volume;
-  float panning;
 
   pthread_mutex_t state_mutex;
   pthread_cond_t state_cond;
@@ -158,18 +158,12 @@ static long run_data_callback(cubeb_stream *stream, void *buffer, long nframes)
   return got;
 }
 
-static void apply_volume_int(int16_t* buffer, unsigned int n,
-                             float volume, float panning)
+static void apply_volume_int(int16_t* buffer, unsigned int n, float volume)
 {
   float left = volume;
   float right = volume;
   unsigned int i;
   int pan[2];
-  if (panning<0) {
-    right *= (1+panning);
-  } else {
-    left *= (1-panning);
-  }
   pan[0] = 128.0*left;
   pan[1] = 128.0*right;
   for(i=0; i<n; i++){
@@ -177,18 +171,12 @@ static void apply_volume_int(int16_t* buffer, unsigned int n,
   }
 }
 
-static void apply_volume_float(float* buffer, unsigned int n,
-                               float volume, float panning)
+static void apply_volume_float(float* buffer, unsigned int n, float volume)
 {
   float left = volume;
   float right = volume;
   unsigned int i;
   float pan[2];
-  if (panning<0) {
-    right *= (1+panning);
-  } else {
-    left *= (1-panning);
-  }
   pan[0] = left;
   pan[1] = right;
   for(i=0; i<n; i++){
@@ -221,8 +209,7 @@ static void *writer(void *stm)
     if (stream->floating) {
       got = run_data_callback(stream, f_buffer,
                               OSS_BUFFER_SIZE/stream->params.channels);
-      apply_volume_float(f_buffer, got*stream->params.channels,
-                                   stream->volume, stream->panning);
+      apply_volume_float(f_buffer, got*stream->params.channels, stream->volume);
       for (i=0; i<((unsigned long)got)*stream->params.channels; i++) {
         /* Clipping is prefered to overflow */
 	if(f_buffer[i]>=1.0){
@@ -237,8 +224,7 @@ static void *writer(void *stm)
     } else {
       got = run_data_callback(stream, buffer,
                               OSS_BUFFER_SIZE/stream->params.channels);
-      apply_volume_int(buffer, got*stream->params.channels,
-                               stream->volume, stream->panning);
+      apply_volume_int(buffer, got*stream->params.channels, stream->volume);
     }
     if (got<0) {
       run_state_callback(stream, CUBEB_STATE_ERROR);
@@ -300,6 +286,11 @@ static int oss_stream_init(cubeb * context, cubeb_stream ** stm,
     return CUBEB_ERROR_DEVICE_UNAVAILABLE;
   }
 
+  // Loopback is unsupported
+  if (output_stream_params && (output_stream_params->prefs & CUBEB_STREAM_PREF_LOOPBACK)) {
+    return CUBEB_ERROR_NOT_SUPPORTED;
+  }
+
   if (((stream->fd = open("/dev/dsp", O_WRONLY)) == -1) &&
       ((stream->fd = open("/dev/sound", O_WRONLY)) == -1)) {
     free(stream);
@@ -314,7 +305,6 @@ static int oss_stream_init(cubeb * context, cubeb_stream ** stm,
 
   stream->params = *output_stream_params;
   stream->volume = 1.0;
-  stream->panning = 0.0;
 
   oss_try_set_latency(stream, latency); 
 
@@ -441,14 +431,6 @@ static int oss_stream_stop(cubeb_stream * stream)
   return CUBEB_OK;
 }
 
-int oss_stream_set_panning(cubeb_stream * stream, float panning)
-{
-  if (stream->params.channels == 2) {
-    stream->panning=panning;
-  }
-  return CUBEB_OK;
-}
-
 int oss_stream_set_volume(cubeb_stream * stream, float volume)
 {
   stream->volume=volume;
@@ -472,7 +454,6 @@ static struct cubeb_ops const oss_ops = {
   .stream_get_position = oss_stream_get_position,
   .stream_get_latency = oss_stream_get_latency,
   .stream_set_volume = oss_stream_set_volume,
-  .stream_set_panning = oss_stream_set_panning,
   .stream_get_current_device = NULL,
   .stream_device_destroy = NULL,
   .stream_register_device_changed_callback = NULL,
