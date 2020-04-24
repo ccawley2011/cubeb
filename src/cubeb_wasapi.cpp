@@ -211,6 +211,7 @@ struct cubeb {
   /* Collection changed for output (render) devices. */
   cubeb_device_collection_changed_callback output_collection_changed_callback = nullptr;
   void * output_collection_changed_user_ptr = nullptr;
+  UINT64 performance_counter_frequency;
 };
 
 class wasapi_endpoint_notification_client;
@@ -334,6 +335,7 @@ struct cubeb_stream {
   std::atomic<std::atomic<bool>*> emergency_bailout { nullptr };
   /* Synchronizes render thread start to ensure safe access to emergency_bailout. */
   HANDLE thread_ready_event = 0;
+  std::atomic<uint64_t> input_latency_hns = 0;
 };
 
 class monitor_device_notifications {
@@ -856,6 +858,7 @@ bool get_input_buffer(cubeb_stream * stm)
   BYTE * input_packet = NULL;
   DWORD flags;
   UINT64 dev_pos;
+  UINT64 pc_position;
   UINT32 next;
   /* Get input packets until we have captured enough frames, and put them in a
    * contiguous buffer. */
@@ -885,12 +888,21 @@ bool get_input_buffer(cubeb_stream * stm)
                                         &frames,
                                         &flags,
                                         &dev_pos,
-                                        NULL);
+                                        &pc_position);
+
     if (FAILED(hr)) {
       LOG("GetBuffer failed for capture: %lx", hr);
       return false;
     }
     XASSERT(frames == next);
+
+    if (stm->context->performance_counter_frequency) {
+      UINT64 now;
+      // See https://docs.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudiocaptureclient-getbuffer, section "Remarks".
+      QueryPerformanceCounter(&now);
+      now = 10000000 * now/stm->context->performance_counter_frequency;
+      stm->input_latency_hns = now - pc_position;
+    }
 
     UINT32 input_stream_samples = frames * stm->input_stream_params.channels;
     // We do not explicitly handle the AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY
@@ -1525,6 +1537,11 @@ int wasapi_init(cubeb ** context, char const * context_name)
   if (cubeb_strings_init(&ctx->device_ids) != CUBEB_OK) {
     delete ctx;
     return CUBEB_ERROR;
+  }
+
+  if (QueryPerformanceFrequency(&ctx->performance_counter_frequency)) {
+    LOG("Failed getting performance counter frequency, latency reporting will be innacurate");
+    ctx->performance_counter_frequency = 0;
   }
 
   *context = ctx;
@@ -2614,6 +2631,22 @@ int wasapi_stream_get_latency(cubeb_stream * stm, uint32_t * latency)
   return CUBEB_OK;
 }
 
+
+int wasapi_stream_get_input_latency(cubeb_stream * stm, uint32_t * latency)
+{
+  XASSERT(stm && latency);
+
+  if (!has_input(stm)) {
+    return CUBEB_ERROR;
+  }
+
+  auto_lock lock(stm->stream_reset_lock);
+
+  *latency = hns_to_frames(stm, stm->input_latency_hns);
+
+  return CUBEB_OK;
+}
+
 int wasapi_stream_set_volume(cubeb_stream * stm, float volume)
 {
   auto_lock lock(stm->stream_reset_lock);
@@ -2973,6 +3006,7 @@ cubeb_ops const wasapi_ops = {
   /*.stream_reset_default_device =*/ wasapi_stream_reset_default_device,
   /*.stream_get_position =*/ wasapi_stream_get_position,
   /*.stream_get_latency =*/ wasapi_stream_get_latency,
+  /*.stream_get_input_latency =*/ wasapi_stream_get_input_latency,
   /*.stream_set_volume =*/ wasapi_stream_set_volume,
   /*.stream_get_current_device =*/ NULL,
   /*.stream_device_destroy =*/ NULL,
