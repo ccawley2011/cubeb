@@ -76,6 +76,7 @@ static int oss_start(int * fd)
 {
   int i;
 
+  errno = EBUSY;
   for (i = 0; i < 3 && errno == EBUSY; ++i) {
     if (((*fd = open("/dev/dsp", O_WRONLY)) != -1) ||
         ((*fd = open("/dev/sound", O_WRONLY)) != -1))
